@@ -7,37 +7,11 @@ import (
 	"time"
 )
 
-// SafeGo 安全的协程执行
-// fn: 要执行的函数
-func SafeGo(fn func()) {
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("[SAFE-GO] goroutine panic recovered: %v\n%s", r, debug.Stack())
-			}
-		}()
-		fn()
-	}()
-}
-
 // WorkerPool 工作池限制协程数量
 type WorkerPool struct {
 	workers chan struct{}  // 工作信号量
 	stop    chan struct{}  // 停止信号
 	wg      sync.WaitGroup // 等待组
-}
-
-// NewWorkerPool 创建工作池
-// maxWorkers: 最大工作协程数
-// 返回: WorkerPool实例
-func NewWorkerPool(maxWorkers int) *WorkerPool {
-	if maxWorkers <= 0 {
-		maxWorkers = 100
-	}
-	return &WorkerPool{
-		workers: make(chan struct{}, maxWorkers),
-		stop:    make(chan struct{}),
-	}
 }
 
 // Submit 提交任务到工作池
@@ -79,26 +53,6 @@ type EventBatcher struct {
 	handler   func([]*Event) // 批次处理函数
 	stop      chan struct{}  // 停止信号
 	wg        sync.WaitGroup // 等待组
-}
-
-// NewEventBatcher 创建事件批处理器
-func NewEventBatcher(batchSize int, timeout time.Duration, handler func([]*Event)) *EventBatcher {
-	if batchSize <= 0 {
-		batchSize = 10
-	}
-	if timeout <= 0 {
-		timeout = 100 * time.Millisecond
-	}
-	batcher := &EventBatcher{
-		events:    make(chan *Event, batchSize*10),
-		batchSize: batchSize,
-		timeout:   timeout,
-		handler:   handler,
-		stop:      make(chan struct{}),
-	}
-	batcher.wg.Add(1)
-	go batcher.process()
-	return batcher
 }
 
 // Publish 发布事件
@@ -177,26 +131,4 @@ func ReleaseEventData(data map[string]any) {
 		delete(data, k)
 	}
 	eventDataPool.Put(data)
-}
-
-// SafePublish 安全发布事件
-func (r *Router) SafePublish(eventName string, data map[string]any) {
-	if r == nil || r.eventBus == nil {
-		return
-	}
-	SafeGo(func() {
-		event := &Event{
-			Name:   eventName,
-			Source: "router",
-			Data:   data,
-			Time:   time.Now(),
-		}
-		if traceID, ok := data["trace_id"].(string); ok {
-			event.TraceID = traceID
-		}
-		r.eventBus.Publish(eventName, BlockTypeEvent, event)
-		if r.config.EnableTriggers && r.triggerManager != nil {
-			r.triggerManager.FireEvent(event)
-		}
-	})
 }

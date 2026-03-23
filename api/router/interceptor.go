@@ -34,11 +34,6 @@ type interceptorNode struct {
 	priority    int // 优先级，越小越先执行
 }
 
-// NewInterceptorChain 创建新的拦截器链
-func NewInterceptorChain() *InterceptorChain {
-	return &InterceptorChain{}
-}
-
 // Add 添加拦截器
 func (c *InterceptorChain) Add(interceptor Interceptor, priority int) {
 	c.mu.Lock()
@@ -137,16 +132,6 @@ func (c *InterceptorChain) Count() int {
 		current = current.next
 	}
 	return count
-}
-
-// NewInterceptorCall 创建新的拦截器调用
-func NewInterceptorCall(name string, args []any) *InterceptorCall {
-	return &InterceptorCall{
-		Name:     name,
-		Args:     args,
-		Start:    time.Now(),
-		Metadata: make(map[string]any),
-	}
 }
 
 // Complete 完成调用并记录结果

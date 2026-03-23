@@ -4,6 +4,7 @@ package router
 import (
 	"context"
 	"fmt"
+	"maps"
 	"reflect"
 	"runtime"
 	"sync"
@@ -26,58 +27,26 @@ type FunctionMetadata struct {
 // Context 执行上下文
 type Context struct {
 	*Router
-	SessionID   string             // 会话唯一标识符
-	AgentID     string             // 调用者身份标识
-	TraceID     string             // 分布式追踪ID
-	StartTime   time.Time          // 上下文创建时间
-	Values      map[string]any     // 上下文键值对存储
-	mu          sync.RWMutex       // 读写互斥锁
-	Timeout     time.Duration      // 执行超时时间
-	cancel      context.CancelFunc // 取消函数
-	CallDepth   int                // 当前调用深度
-	ParentID    string             // 父调用ID
-	wrappers    sync.Map           // 函数包装器映射
-	interceptor *InterceptorChain  // 全局拦截器链
-
+	SessionID       string             // 会话唯一标识符
+	AgentID         string             // 调用者身份标识
+	TraceID         string             // 分布式追踪ID
+	StartTime       time.Time          // 上下文创建时间
+	Values          map[string]any     // 上下文键值对存储
+	mu              sync.RWMutex       // 读写互斥锁
+	Timeout         time.Duration      // 执行超时时间
+	cancel          context.CancelFunc // 取消函数
+	CallDepth       int                // 当前调用深度
+	ParentID        string             // 父调用ID
+	wrappers        sync.Map           // 函数包装器映射
+	interceptor     *InterceptorChain  // 全局拦截器链
+	recoveryHandler RecoveryHandler    // 错误恢复
 }
 
-// NewContext 创建新的上下文
-// sessionID: 会话ID
-// agentID: 调用者ID
-// router: 路由器接口
-// 返回: 新的上下文实例
-func NewContext(sessionID, agentID string, router *Router) *Context {
-	var timeout time.Duration
-	if config := router.GetConfig(); config != nil {
-		timeout = config.DefaultTimeout
-	} else {
-		timeout = 30 * time.Second
-	}
-	context := &Context{
-		SessionID:   sessionID,
-		AgentID:     agentID,
-		TraceID:     fmt.Sprintf("trace-%d", time.Now().UnixNano()),
-		StartTime:   time.Now(),
-		Router:      router,
-		Timeout:     timeout,
-		CallDepth:   0,
-		wrappers:    sync.Map{},
-		interceptor: NewInterceptorChain(),
-	}
-	context.Values = map[string]any{
-		"router":  router,
-		"context": context,
-	}
-
-	// 发布上下文创建事件
-	router.PublishEventName(EventFunctionContextCreated, map[string]any{
-		"session_id": sessionID,
-		"agent_id":   agentID,
-		"trace_id":   context.TraceID,
-		"timestamp":  time.Now().UnixNano(),
-	})
-
-	return context
+// SetRecoveryHandler 设置恢复处理器
+func (c *Context) SetRecoveryHandler(handler RecoveryHandler) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.recoveryHandler = handler
 }
 
 // GetCallDepth 获取当前调用深度
@@ -136,6 +105,18 @@ func (c *Context) DeleteValue(key string) {
 // fields: 附加字段
 func (c *Context) LogError(message string, fields map[string]any) {
 	fmt.Printf("[ERROR] %s: %v\n", message, fields)
+}
+
+// LogErrorEvent 记录错误事件
+func (c *Context) LogErrorEvent(eventName string, message string, data map[string]any) {
+	fields := map[string]any{
+		"caller":    c.AgentID,
+		"trace_id":  c.TraceID,
+		"timestamp": time.Now().UnixNano(),
+	}
+	maps.Copy(fields, data)
+	c.Router.PublishEventName(eventName, fields)
+	c.LogError(message, fields)
 }
 
 // RegisterWithInterceptors 注册函数并附加拦截器
@@ -442,8 +423,7 @@ func (c *Context) CallFunc(name string, call any) (err error) {
 	fn := c.GetFunction(name)
 	if fn == nil {
 		errMsg := fmt.Sprintf("函数未找到: %s", name)
-		c.LogError("函数绑定失败", map[string]any{"name": name})
-		c.PublishEventName(EventFunctionFailed, map[string]any{
+		c.LogErrorEvent(EventFunctionFailed, "函数绑定失败", map[string]any{
 			"function": name,
 			"error":    errMsg,
 			"trace_id": c.TraceID,
@@ -456,8 +436,7 @@ func (c *Context) CallFunc(name string, call any) (err error) {
 	// 检查函数是否启用
 	if !fn.Enabled {
 		errMsg := fmt.Sprintf("函数已禁用: %s", name)
-		c.LogError("函数绑定失败", map[string]any{"name": name})
-		c.PublishEventName(EventFunctionFailed, map[string]any{
+		c.LogErrorEvent(EventFunctionFailed, "函数绑定失败", map[string]any{
 			"function": name,
 			"error":    errMsg,
 			"trace_id": c.TraceID,
@@ -470,9 +449,9 @@ func (c *Context) CallFunc(name string, call any) (err error) {
 	// 检查调用深度限制
 	if c.GetCallDepth() >= c.GetConfig().MaxCallDepth {
 		errMsg := fmt.Sprintf("达到最大调用深度限制: %d", c.GetConfig().MaxCallDepth)
-		c.LogError("函数绑定失败", map[string]any{"name": name, "depth": c.GetCallDepth()})
-		c.PublishEventName(EventFunctionFailed, map[string]any{
+		c.LogErrorEvent(EventFunctionFailed, "函数绑定失败", map[string]any{
 			"function": name,
+			"depth":    c.GetCallDepth(),
 			"error":    errMsg,
 			"trace_id": c.TraceID,
 			"duration": time.Since(startTime).Milliseconds(),
@@ -485,28 +464,28 @@ func (c *Context) CallFunc(name string, call any) (err error) {
 	targetValue := reflect.ValueOf(call)
 	if targetValue.Kind() != reflect.Ptr {
 		errMsg := "call 参数必须是指向函数变量的指针"
-		c.LogError("函数绑定失败", map[string]any{"name": name, "call_type": targetValue.Kind().String()})
-		c.PublishEventName(EventFunctionFailed, map[string]any{
-			"function": name,
-			"error":    errMsg,
-			"trace_id": c.TraceID,
-			"duration": time.Since(startTime).Milliseconds(),
-			"reason":   "invalid_call_type",
-			"action":   "bind",
+		c.LogErrorEvent(EventFunctionFailed, "函数绑定失败", map[string]any{
+			"error":     errMsg,
+			"function":  name,
+			"call_type": targetValue.Kind().String(),
+			"trace_id":  c.TraceID,
+			"duration":  time.Since(startTime).Milliseconds(),
+			"reason":    "invalid_call_type",
+			"action":    "bind",
 		})
 		return fmt.Errorf("%s", errMsg)
 	}
 	targetElem := targetValue.Elem()
 	if targetElem.Kind() != reflect.Func {
 		errMsg := "目标变量必须是函数类型"
-		c.LogError("函数绑定失败", map[string]any{"name": name, "elem_type": targetElem.Kind().String()})
-		c.PublishEventName(EventFunctionFailed, map[string]any{
-			"function": name,
-			"error":    errMsg,
-			"trace_id": c.TraceID,
-			"duration": time.Since(startTime).Milliseconds(),
-			"reason":   "invalid_target_type",
-			"action":   "bind",
+		c.LogErrorEvent(EventFunctionFailed, "函数绑定失败", map[string]any{
+			"function":  name,
+			"elem_type": targetElem.Kind().String(),
+			"error":     errMsg,
+			"trace_id":  c.TraceID,
+			"duration":  time.Since(startTime).Milliseconds(),
+			"reason":    "invalid_target_type",
+			"action":    "bind",
 		})
 		return fmt.Errorf("%s", errMsg)
 	}
@@ -514,8 +493,7 @@ func (c *Context) CallFunc(name string, call any) (err error) {
 	originalFn := reflect.ValueOf(fn.Function)
 	if originalFn.Kind() != reflect.Func {
 		errMsg := fmt.Sprintf("注册的函数无效: %s", name)
-		c.LogError("函数绑定失败", map[string]any{"name": name})
-		c.PublishEventName(EventFunctionFailed, map[string]any{
+		c.LogErrorEvent(EventFunctionFailed, "函数绑定失败", map[string]any{
 			"function": name,
 			"error":    errMsg,
 			"trace_id": c.TraceID,
@@ -530,8 +508,7 @@ func (c *Context) CallFunc(name string, call any) (err error) {
 		namespaceValue := c.GetValue(fn.Namespace)
 		if namespaceValue == nil {
 			errMsg := fmt.Sprintf("命名空间未找到: %s", fn.Namespace)
-			c.LogError("函数绑定失败", map[string]any{"name": name, "namespace": fn.Namespace})
-			c.PublishEventName(EventFunctionFailed, map[string]any{
+			c.LogErrorEvent(EventFunctionFailed, "函数绑定失败", map[string]any{
 				"function":  name,
 				"namespace": fn.Namespace,
 				"error":     errMsg,
@@ -561,19 +538,16 @@ func (c *Context) CallFunc(name string, call any) (err error) {
 		// 检查类型兼容性
 		if !originalFn.Type().AssignableTo(targetElem.Type()) {
 			errMsg := fmt.Sprintf("函数类型不兼容: 期望 %v, 实际 %v", targetElem.Type(), originalFn.Type())
-			c.LogError("函数绑定失败", map[string]any{
-				"name":          name,
+			c.LogErrorEvent(EventFunctionFailed, "函数绑定失败", map[string]any{
 				"expected":      targetElem.Type().String(),
 				"actual":        originalFn.Type().String(),
 				"is_assignable": originalFn.Type().AssignableTo(targetElem.Type()),
-			})
-			c.PublishEventName(EventFunctionFailed, map[string]any{
-				"function": name,
-				"error":    errMsg,
-				"trace_id": c.TraceID,
-				"duration": time.Since(startTime).Milliseconds(),
-				"reason":   "type_mismatch",
-				"action":   "bind",
+				"function":      name,
+				"error":         errMsg,
+				"trace_id":      c.TraceID,
+				"duration":      time.Since(startTime).Milliseconds(),
+				"reason":        "type_mismatch",
+				"action":        "bind",
 			})
 			return fmt.Errorf("%s", errMsg)
 		}

@@ -35,35 +35,20 @@ type SafeAsyncExecutor struct {
 	wg         sync.WaitGroup
 }
 
-// NewSafeAsyncExecutor 创建安全的异步执行器
-func NewSafeAsyncExecutor(maxWorkers int) *SafeAsyncExecutor {
-	if maxWorkers <= 0 {
-		maxWorkers = 100
-	}
-	return &SafeAsyncExecutor{
-		workerPool: NewWorkerPool(maxWorkers),
-		stop:       make(chan struct{}),
-	}
-}
-
 // Execute 执行无返回值的函数
 func (sae *SafeAsyncExecutor) Execute(fn func() error) error {
 	sae.wg.Add(1)
-
 	sae.workerPool.Submit(func() {
 		defer sae.wg.Done()
-
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("[ASYNC-EXECUTOR] panic recovered: %v\n%s", r, debug.Stack())
 			}
 		}()
-
 		if err := fn(); err != nil {
 			log.Printf("[ASYNC-EXECUTOR] function error: %v", err)
 		}
 	})
-
 	return nil
 }
 
@@ -71,27 +56,22 @@ func (sae *SafeAsyncExecutor) Execute(fn func() error) error {
 func (sae *SafeAsyncExecutor) ExecuteWithResult(fn func() (any, error)) (any, error) {
 	resultChan := make(chan any, 1)
 	errorChan := make(chan error, 1)
-
 	sae.wg.Add(1)
 	sae.workerPool.Submit(func() {
 		defer sae.wg.Done()
-
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("[ASYNC-EXECUTOR] panic recovered: %v\n%s", r, debug.Stack())
 				errorChan <- &PanicError{Value: r}
 			}
 		}()
-
 		result, err := fn()
 		if err != nil {
 			errorChan <- err
 			return
 		}
-
 		resultChan <- result
 	})
-
 	select {
 	case result := <-resultChan:
 		return result, nil
@@ -132,21 +112,6 @@ type EventPublisher struct {
 	enableAsync bool
 }
 
-// NewEventPublisher 创建事件发布器
-func NewEventPublisher(eventBus *EventBus, enableAsync bool) *EventPublisher {
-	var executor AsyncExecutor
-	if enableAsync {
-		executor = NewSafeAsyncExecutor(50)
-	} else {
-		executor = &SyncExecutor{}
-	}
-	return &EventPublisher{
-		executor:    executor,
-		eventBus:    eventBus,
-		enableAsync: enableAsync,
-	}
-}
-
 // Publish 发布事件
 func (ep *EventPublisher) Publish(event string, blockType BlockType, data any) {
 	publishFn := func() error {
@@ -183,15 +148,6 @@ type RouterEventPublisher struct {
 	router          *Router
 	eventPublisher  *EventPublisher
 	triggerExecutor AsyncExecutor
-}
-
-// NewRouterEventPublisher 创建路由器事件发布器
-func NewRouterEventPublisher(router *Router, enableAsync bool) *RouterEventPublisher {
-	return &RouterEventPublisher{
-		router:          router,
-		eventPublisher:  NewEventPublisher(router.eventBus, enableAsync),
-		triggerExecutor: &SyncExecutor{},
-	}
 }
 
 // PublishEvent 发布事件

@@ -9,66 +9,14 @@ import (
 
 // Router 路由器
 type Router struct {
-	mu              sync.RWMutex
-	functions       map[string]*Function
-	eventBus        *EventBus
-	config          *RouterConfig
-	callSemaphore   chan struct{}
-	stats           *RouterStats
-	triggerManager  *TriggerManager
-	eventPublisher  *RouterEventPublisher
-	recoveryHandler RecoveryHandler
-}
-
-// NewRouter 创建路由器
-func NewRouter(config *RouterConfig) *Router {
-	if config == nil {
-		config = DefaultConfig()
-	}
-	router := &Router{
-		functions: make(map[string]*Function),
-		eventBus: &EventBus{
-			subscribers: make(map[string][]EventHandler),
-		},
-		config:        config,
-		callSemaphore: make(chan struct{}, config.MaxConcurrentCalls),
-		stats: &RouterStats{
-			StartTime: time.Now(),
-		},
-		recoveryHandler: func(ctx *Context, block *DataBlock, panicValue any) *Result {
-			return &Result{
-				Success: false,
-				Error: &ErrorInfo{
-					Code:      "PANIC_RECOVERED",
-					Message:   fmt.Sprintf("函数执行panic: %v", panicValue),
-					Recovered: true,
-					Retryable: false,
-				},
-				TraceID: block.TraceID,
-			}
-		},
-	}
-	router.eventPublisher = NewRouterEventPublisher(router, config.EnableAsyncEvents)
-	if config.EnableTriggers {
-		if config.TriggerConfig == nil {
-			config.TriggerConfig = &TriggerManagerConfig{
-				MaxTriggers:        100,
-				EnableAsync:        true,
-				MaxConcurrentFires: 50,
-				EventBufferSize:    1000,
-				EnableStats:        true,
-			}
-		}
-		router.triggerManager = &TriggerManager{
-			triggers: make(map[string]*Trigger),
-			eventBus: router.eventBus,
-			stats: &TriggerManagerStats{
-				StartTime: time.Now(),
-			},
-			config: config.TriggerConfig,
-		}
-	}
-	return router
+	mu             sync.RWMutex
+	functions      map[string]*Function
+	eventBus       *EventBus
+	config         *RouterConfig
+	callSemaphore  chan struct{}
+	stats          *RouterStats
+	triggerManager *TriggerManager
+	eventPublisher *RouterEventPublisher
 }
 
 // Register 注册用户自定义函数
@@ -202,11 +150,6 @@ func (r *Router) DisableFunction(name string) error {
 	return nil
 }
 
-// PublishEventName 发布事件名称
-func (r *Router) PublishEventName(eventName string, data map[string]any) {
-	r.eventPublisher.PublishEventName(eventName, data)
-}
-
 // SubscribeEvent 订阅事件
 func (r *Router) SubscribeEvent(event string, handler EventHandler) int {
 	if r.eventBus != nil {
@@ -231,6 +174,33 @@ func (r *Router) RegisterTrigger(trigger *Trigger) error {
 	return r.triggerManager.RegisterTrigger(trigger)
 }
 
+// PublishEventName 发布事件名称
+func (r *Router) PublishEventName(eventName string, data map[string]any) {
+	r.eventPublisher.PublishEventName(eventName, data)
+}
+
+// SafePublish 安全发布事件
+func (r *Router) SafePublish(eventName string, data map[string]any) {
+	if r == nil || r.eventBus == nil {
+		return
+	}
+	SafeGo(func() {
+		event := &Event{
+			Name:   eventName,
+			Source: "router",
+			Data:   data,
+			Time:   time.Now(),
+		}
+		if traceID, ok := data["trace_id"].(string); ok {
+			event.TraceID = traceID
+		}
+		r.eventBus.Publish(eventName, BlockTypeEvent, event)
+		if r.config.EnableTriggers && r.triggerManager != nil {
+			r.triggerManager.FireEvent(event)
+		}
+	})
+}
+
 // GetStats 获取统计信息
 func (r *Router) GetStats() *RouterStats {
 	r.mu.RLock()
@@ -249,13 +219,6 @@ func (r *Router) GetStats() *RouterStats {
 // GetConfig 获取配置
 func (r *Router) GetConfig() *RouterConfig {
 	return r.config
-}
-
-// SetRecoveryHandler 设置恢复处理器
-func (r *Router) SetRecoveryHandler(handler RecoveryHandler) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.recoveryHandler = handler
 }
 
 // Shutdown 关闭路由器

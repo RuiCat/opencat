@@ -6,16 +6,6 @@ import (
 	"time"
 )
 
-// 触发器事件常量
-const (
-	EventTriggerRegistered   = "trigger.registered"   // 触发器注册
-	EventTriggerUnregistered = "trigger.unregistered" // 触发器注销
-	EventTriggerEnabled      = "trigger.enabled"      // 触发器启用
-	EventTriggerDisabled     = "trigger.disabled"     // 触发器禁用
-	EventTriggerFired        = "trigger.fired"        // 触发器触发
-	EventTriggerError        = "trigger.error"        // 触发器错误
-)
-
 // RegisterTrigger 注册触发器
 func (tm *TriggerManager) RegisterTrigger(trigger *Trigger) error {
 	tm.mu.Lock()
