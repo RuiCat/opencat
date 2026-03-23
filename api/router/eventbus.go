@@ -1,6 +1,9 @@
 package router
 
 // Subscribe 订阅事件
+// event: 事件名称
+// handler: 事件处理函数
+// 返回: 订阅ID
 func (eb *EventBus) Subscribe(event string, handler EventHandler) int {
 	eb.mu.Lock()
 	defer eb.mu.Unlock()
@@ -12,31 +15,28 @@ func (eb *EventBus) Subscribe(event string, handler EventHandler) int {
 }
 
 // Publish 发布事件
+// event: 事件名称
+// blockType: 数据块类型
+// data: 事件数据
 func (eb *EventBus) Publish(event string, blockType BlockType, data any) {
-	eb.mu.RLock()
-	handlers := eb.subscribers[event]
-	wildcardHandlers := eb.subscribers["*"]
-	eb.mu.RUnlock()
-	for _, handler := range handlers {
-		go handler(blockType, data)
-	}
-	for _, handler := range wildcardHandlers {
-		go handler(blockType, data)
-	}
+	eb.publishInternal(event, blockType, data)
 }
 
-// Unsubscribe 取消订阅
+// Unsubscribe 取消订阅事件
+// event: 事件名称
 func (eb *EventBus) Unsubscribe(event string) {
 	eb.mu.Lock()
 	defer eb.mu.Unlock()
 	handlers := eb.subscribers[event]
 	for _, handler := range handlers {
-		go handler(BlockTypeUnsubscribe, nil)
+		handler(BlockTypeUnsubscribe, nil)
 	}
 	delete(eb.subscribers, event)
 }
 
-// HasSubscribers 检查事件是否有订阅者
+// HasSubscribers 检查是否有订阅者
+// event: 事件名称
+// 返回: 是否有订阅者
 func (eb *EventBus) HasSubscribers(event string) bool {
 	eb.mu.RLock()
 	defer eb.mu.RUnlock()
@@ -45,6 +45,8 @@ func (eb *EventBus) HasSubscribers(event string) bool {
 }
 
 // SubscriberCount 获取订阅者数量
+// event: 事件名称
+// 返回: 订阅者数量
 func (eb *EventBus) SubscriberCount(event string) int {
 	eb.mu.RLock()
 	defer eb.mu.RUnlock()

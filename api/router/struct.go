@@ -5,44 +5,42 @@ import (
 	"time"
 )
 
-// BlockType 数据块类型
+// 数据块类型
 type BlockType int
 
 const (
-	BlockTypeUnsubscribe BlockType = iota - 1 // 取消订阅
-	BlockTypeCommand                          // 命令调用
-	BlockTypeResult                           // 执行结果
-	BlockTypeEvent                            // 事件通知
-	BlockTypeLog                              // 日志记录
-	BlockTypeError                            // 错误信息
+	BlockTypeUnsubscribe BlockType = iota - 1 // 取消订阅块类型
+	BlockTypeCommand                          // 命令块类型
+	BlockTypeResult                           // 结果块类型
+	BlockTypeEvent                            // 事件块类型
+	BlockTypeLog                              // 日志块类型
+	BlockTypeError                            // 错误块类型
 )
 
-// RecoveryHandler 崩溃恢复处理器
+// 崩溃恢复处理器
 type RecoveryHandler func(ctx *Context, block *DataBlock, panicValue any) *Result
 
-// EventHandler 事件处理器
+// 事件处理器
 type EventHandler func(blockType BlockType, data any)
 
-// DataBlock 统一数据块
+// 数据统一
 type DataBlock struct {
-	ID        string            `json:"id"`        // 唯一标识符
-	Type      BlockType         `json:"type"`      // 数据块类型
-	Timestamp int64             `json:"timestamp"` // 时间戳(毫秒)
-	Source    string            `json:"source"`    // 调用来源
-	Target    string            `json:"target"`    // 目标函数
-	Payload   map[string]any    `json:"payload"`   // 有效载荷
-	Metadata  map[string]string `json:"metadata"`  // 元数据
-	TraceID   string            `json:"trace_id"`  // 追踪链路ID
-	ParentID  string            `json:"parent_id"` // 父调用ID
+	ID        string         `json:"id"`        // 唯一标识符
+	Type      BlockType      `json:"type"`      // 数据块类型
+	Timestamp int64          `json:"timestamp"` // 时间戳(毫秒)
+	Source    string         `json:"source"`    // 调用来源
+	Target    string         `json:"target"`    // 目标函数
+	Payload   map[string]any `json:"payload"`   // 有效载荷
+	TraceID   string         `json:"trace_id"`  // 追踪链路ID
 }
 
-// EventBus 事件总线
+// 事件总线
 type EventBus struct {
 	mu          sync.RWMutex
 	subscribers map[string][]EventHandler
 }
 
-// Function 函数定义
+// 函数定义
 type Function struct {
 	Name         string         `json:"name"`          // 函数名称
 	Description  string         `json:"description"`   // 函数描述
@@ -57,7 +55,7 @@ type Function struct {
 	Stats        *FunctionStats `json:"stats"`         // 统计信息
 }
 
-// FunctionStats 函数统计
+// FunctionStats 函数统计信息
 type FunctionStats struct {
 	CallCount    int64         `json:"call_count"`     // 总调用次数
 	SuccessCount int64         `json:"success_count"`  // 成功次数
@@ -67,31 +65,7 @@ type FunctionStats struct {
 	LastCalledAt time.Time     `json:"last_called_at"` // 最后调用时间
 }
 
-// Interceptor 拦截器接口
-type Interceptor interface {
-	Before(ctx *Context, block *DataBlock) error          // 前置拦截
-	After(ctx *Context, block *DataBlock, result *Result) // 后置拦截
-}
-
-// FunctionMetrics 函数指标
-type FunctionMetrics struct {
-	CallCount     int64
-	SuccessCount  int64
-	ErrorCount    int64
-	TotalDuration time.Duration
-	LastCallTime  time.Time
-}
-
-// CircuitBreaker 熔断器
-type CircuitBreaker struct {
-	FailureThreshold int           // 失败阈值
-	ResetTimeout     time.Duration // 重置超时
-	State            string        // 状态: closed/open/half-open
-	FailureCount     int           // 失败计数
-	LastFailureTime  time.Time     // 最后失败时间
-}
-
-// ErrorInfo 错误详情
+// 错误详情
 type ErrorInfo struct {
 	Code      string `json:"code"`            // 错误码
 	Message   string `json:"message"`         // 错误消息
@@ -100,25 +74,16 @@ type ErrorInfo struct {
 	Retryable bool   `json:"retryable"`       // 是否可重试
 }
 
-// LogEntry 日志条目
-type LogEntry struct {
-	Level     string         `json:"level"`            // 日志级别
-	Message   string         `json:"message"`          // 日志消息
-	Timestamp time.Time      `json:"timestamp"`        // 时间戳
-	Fields    map[string]any `json:"fields,omitempty"` // 附加字段
-}
-
-// Result 执行结果
+// 执行结果
 type Result struct {
 	Success  bool       `json:"success"`         // 是否成功
 	Data     any        `json:"data,omitempty"`  // 返回数据
 	Error    *ErrorInfo `json:"error,omitempty"` // 错误信息
 	Duration int64      `json:"duration_ms"`     // 执行耗时(毫秒)
 	TraceID  string     `json:"trace_id"`        // 追踪ID
-	Logs     []LogEntry `json:"logs,omitempty"`  // 执行日志
 }
 
-// RouterConfig 路由配置
+// 路由器
 type RouterConfig struct {
 	MaxCallDepth       int                   // 最大调用深度
 	DefaultTimeout     time.Duration         // 默认超时时间
@@ -127,10 +92,11 @@ type RouterConfig struct {
 	MaxFunctions       int                   // 最大函数数量
 	MaxConcurrentCalls int                   // 最大并发调用数
 	EnableTriggers     bool                  // 是否启用触发器
+	EnableAsyncEvents  bool                  // 是否启用异步事件
 	TriggerConfig      *TriggerManagerConfig // 触发器配置
 }
 
-// RouterStats 路由统计
+// 路由器
 type RouterStats struct {
 	TotalCalls      int64         `json:"total_calls"`       // 总调用次数
 	SuccessfulCalls int64         `json:"successful_calls"`  // 成功调用次数
@@ -139,19 +105,6 @@ type RouterStats struct {
 	AvgCallDuration time.Duration `json:"avg_call_duration"` // 平均调用时长
 	StartTime       time.Time     `json:"start_time"`        // 启动时间
 	FunctionCount   int           `json:"function_count"`    // 函数数量
-}
-
-// Router 路由执行器
-type Router struct {
-	mu              sync.RWMutex
-	functions       map[string]*Function
-	interceptors    map[string]Interceptor
-	recoveryHandler RecoveryHandler
-	eventBus        *EventBus
-	config          *RouterConfig
-	callSemaphore   chan struct{}
-	stats           *RouterStats
-	triggerManager  *TriggerManager
 }
 
 // TriggerManager 触发器管理器
@@ -163,7 +116,7 @@ type TriggerManager struct {
 	config   *TriggerManagerConfig
 }
 
-// TriggerManagerStats 触发器管理器统计
+// TriggerManagerStats 触发器管理器统计信息
 type TriggerManagerStats struct {
 	TotalTriggers   int       `json:"total_triggers"`   // 触发器总数
 	EnabledTriggers int       `json:"enabled_triggers"` // 启用数量
@@ -184,7 +137,7 @@ type TriggerManagerConfig struct {
 	EnableStats        bool `json:"enable_stats"`         // 是否启用统计
 }
 
-// Trigger 触发器定义
+// 触发定义
 type Trigger struct {
 	ID           string                   `json:"id"`            // 唯一标识符
 	Name         string                   `json:"name"`          // 触发器名称
@@ -202,12 +155,11 @@ type Trigger struct {
 	LastError    string                   `json:"last_error"`    // 最后错误信息
 }
 
-// Event 事件定义
+// 事件定义
 type Event struct {
-	Name     string            `json:"name"`     // 事件名称
-	Source   string            `json:"source"`   // 事件来源
-	Data     map[string]any    `json:"data"`     // 事件数据
-	Time     time.Time         `json:"time"`     // 发生时间
-	TraceID  string            `json:"trace_id"` // 追踪ID
-	Metadata map[string]string `json:"metadata"` // 元数据
+	Name    string         `json:"name"`     // 事件名称
+	Source  string         `json:"source"`   // 事件来源
+	Data    map[string]any `json:"data"`     // 事件数据
+	Time    time.Time      `json:"time"`     // 发生时间
+	TraceID string         `json:"trace_id"` // 追踪ID
 }

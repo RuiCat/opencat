@@ -6,6 +6,16 @@ import (
 	"time"
 )
 
+// 触发器事件常量
+const (
+	EventTriggerRegistered   = "trigger.registered"   // 触发器注册
+	EventTriggerUnregistered = "trigger.unregistered" // 触发器注销
+	EventTriggerEnabled      = "trigger.enabled"      // 触发器启用
+	EventTriggerDisabled     = "trigger.disabled"     // 触发器禁用
+	EventTriggerFired        = "trigger.fired"        // 触发器触发
+	EventTriggerError        = "trigger.error"        // 触发器错误
+)
+
 // RegisterTrigger 注册触发器
 func (tm *TriggerManager) RegisterTrigger(trigger *Trigger) error {
 	tm.mu.Lock()
@@ -26,9 +36,8 @@ func (tm *TriggerManager) RegisterTrigger(trigger *Trigger) error {
 			tm.stats.EnabledTriggers++
 		}
 	}
-	// 发布触发器注册事件
 	if tm.eventBus != nil {
-		go tm.eventBus.Publish(EventTriggerRegistered, BlockTypeEvent, map[string]any{
+		tm.eventBus.Publish(EventTriggerRegistered, BlockTypeEvent, map[string]any{
 			"trigger_id":    trigger.ID,
 			"trigger_name":  trigger.Name,
 			"description":   trigger.Description,
@@ -54,9 +63,8 @@ func (tm *TriggerManager) UnregisterTrigger(id string) error {
 	}
 	delete(tm.triggers, id)
 	tm.stats.TotalTriggers = len(tm.triggers)
-	// 发布触发器注销事件
 	if tm.eventBus != nil {
-		go tm.eventBus.Publish(EventTriggerUnregistered, BlockTypeEvent, map[string]any{
+		tm.eventBus.Publish(EventTriggerUnregistered, BlockTypeEvent, map[string]any{
 			"trigger_id":    id,
 			"trigger_name":  trigger.Name,
 			"description":   trigger.Description,
@@ -85,9 +93,8 @@ func (tm *TriggerManager) EnableTrigger(id string) error {
 		if tm.config.EnableStats {
 			tm.stats.EnabledTriggers++
 		}
-		// 发布触发器启用事件
 		if tm.eventBus != nil {
-			go tm.eventBus.Publish(EventTriggerEnabled, BlockTypeEvent, map[string]any{
+			tm.eventBus.Publish(EventTriggerEnabled, BlockTypeEvent, map[string]any{
 				"trigger_id":    id,
 				"trigger_name":  trigger.Name,
 				"description":   trigger.Description,
@@ -113,9 +120,8 @@ func (tm *TriggerManager) DisableTrigger(id string) error {
 		if tm.config.EnableStats {
 			tm.stats.EnabledTriggers--
 		}
-		// 发布触发器禁用事件
 		if tm.eventBus != nil {
-			go tm.eventBus.Publish(EventTriggerDisabled, BlockTypeEvent, map[string]any{
+			tm.eventBus.Publish(EventTriggerDisabled, BlockTypeEvent, map[string]any{
 				"trigger_id":    id,
 				"trigger_name":  trigger.Name,
 				"description":   trigger.Description,
@@ -170,11 +176,7 @@ func (tm *TriggerManager) FireEvent(event *Event) error {
 		}
 	}
 	for _, trigger := range triggers {
-		if tm.config.EnableAsync {
-			go tm.executeTrigger(trigger, event)
-		} else {
-			tm.executeTrigger(trigger, event)
-		}
+		tm.executeTrigger(trigger, event)
 	}
 	return nil
 }
@@ -191,9 +193,8 @@ func (tm *TriggerManager) executeTrigger(trigger *Trigger, event *Event) {
 		tm.stats.TriggeredCount++
 	}
 	tm.mu.Unlock()
-	// 发布触发器触发事件
 	if tm.eventBus != nil {
-		go tm.eventBus.Publish(EventTriggerFired, BlockTypeEvent, map[string]any{
+		tm.eventBus.Publish(EventTriggerFired, BlockTypeEvent, map[string]any{
 			"trigger_id":   trigger.ID,
 			"trigger_name": trigger.Name,
 			"event_name":   event.Name,
@@ -211,9 +212,8 @@ func (tm *TriggerManager) executeTrigger(trigger *Trigger, event *Event) {
 			if tm.config.EnableStats {
 				tm.stats.ErrorCount++
 			}
-			// 发布触发器错误事件
 			if tm.eventBus != nil {
-				go tm.eventBus.Publish(EventTriggerError, BlockTypeEvent, map[string]any{
+				tm.eventBus.Publish(EventTriggerError, BlockTypeEvent, map[string]any{
 					"trigger_id":   trigger.ID,
 					"trigger_name": trigger.Name,
 					"event_name":   event.Name,
@@ -231,7 +231,7 @@ func (tm *TriggerManager) executeTrigger(trigger *Trigger, event *Event) {
 	}
 }
 
-// matchEventPattern 匹配事件模式，支持通配符
+// matchEventPattern 匹配事件模式
 func (tm *TriggerManager) matchEventPattern(pattern, eventName string) bool {
 	if pattern == eventName {
 		return true

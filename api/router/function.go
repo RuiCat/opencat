@@ -1,111 +1,53 @@
 package router
 
 import (
-	"reflect"
 	"runtime"
 	"time"
 )
 
-// 函数调用事件常量
+// 函数事件常量
 const (
-	EventFunctionCalled  = "function.called"  // 函数被调用
-	EventFunctionSuccess = "function.success" // 函数调用成功
-	EventFunctionFailed  = "function.failed"  // 函数调用失败
-	EventFunctionPanic   = "function.panic"   // 函数调用panic
+	EventFunctionCalled                 = "function.called"                    // 函数被调用
+	EventFunctionSuccess                = "function.success"                   // 函数调用成功
+	EventFunctionFailed                 = "function.failed"                    // 函数调用失败
+	EventFunctionPanic                  = "function.panic"                     // 函数调用panic
+	EventFunctionRegistered             = "function.registered"                // 函数注册
+	EventFunctionUnregistered           = "function.unregistered"              // 函数注销
+	EventFunctionEnabled                = "function.enabled"                   // 函数启用
+	EventFunctionDisabled               = "function.disabled"                  // 函数禁用
+	EventFunctionTimeout                = "function.timeout"                   // 函数调用超时
+	EventFunctionConcurrentLimit        = "function.concurrent_limit"          // 并发限制触发
+	EventFunctionInterceptorStart       = "function.interceptor_start"         // 拦截器开始执行
+	EventFunctionInterceptorEnd         = "function.interceptor_end"           // 拦截器执行结束
+	EventFunctionInterceptorError       = "function.interceptor_error"         // 拦截器执行错误
+	EventFunctionStatsUpdated           = "function.stats_updated"             // 统计信息更新
+	EventFunctionContextCreated         = "function.context_created"           // 上下文创建
+	EventFunctionContextDestroyed       = "function.context_destroyed"         // 上下文销毁
+	EventFunctionValidationFailed       = "function.validation_failed"         // 参数验证失败
+	EventFunctionRateLimited            = "function.rate_limited"              // 函数调用被限流
+	EventFunctionCircuitBreakerOpen     = "function.circuit_breaker_open"      // 熔断器打开
+	EventFunctionCircuitBreakerClosed   = "function.circuit_breaker_closed"    // 熔断器关闭
+	EventFunctionCircuitBreakerHalfOpen = "function.circuit_breaker_half_open" // 熔断器半开
+	EventFunctionRetryAttempt           = "function.retry_attempt"             // 重试尝试
+	EventFunctionRetryExhausted         = "function.retry_exhausted"           // 重试耗尽
+	EventFunctionCacheHit               = "function.cache_hit"                 // 缓存命中
+	EventFunctionCacheMiss              = "function.cache_miss"                // 缓存未命中
+	EventFunctionCacheUpdated           = "function.cache_updated"             // 缓存更新
 )
 
-// Call 调用
+// Call 调用函数
+// ctx: 执行上下文
+// name: 函数名称
+// 返回: 函数执行结果
 func Call[T any](ctx *Context, name string) (zero T) {
-	startTime := time.Now()
-	fn := ctx.Router.GetFunction(name)
-	// 发布函数调用开始事件
-	ctx.Router.PublishEventName(EventFunctionCalled, map[string]any{
-		"function":  name,
-		"caller":    ctx.AgentID,
-		"trace_id":  ctx.TraceID,
-		"depth":     ctx.GetCallDepth(),
-		"timestamp": startTime.UnixNano(),
-	})
-	switch {
-	case fn == nil:
-		ctx.LogError("函数调用失败", map[string]any{"name": name})
-		// 发布函数调用失败事件
-		ctx.Router.PublishEventName(EventFunctionFailed, map[string]any{
-			"function": name,
-			"error":    "函数不存在",
-			"trace_id": ctx.TraceID,
-			"duration": time.Since(startTime).Milliseconds(),
-			"reason":   "function_not_found",
-		})
-		return zero
-	case fn.IsMethod:
-		v := ctx.GetValue(fn.Namespace)
-		if v == nil {
-			ctx.LogError("函数命名空间不存在", map[string]any{"name": name, "namespace": fn.Namespace})
-			// 发布函数调用失败事件
-			ctx.Router.PublishEventName(EventFunctionFailed, map[string]any{
-				"function":  name,
-				"namespace": fn.Namespace,
-				"error":     "命名空间不存在",
-				"trace_id":  ctx.TraceID,
-				"duration":  time.Since(startTime).Milliseconds(),
-				"reason":    "namespace_not_found",
-			})
-			return zero
-		}
-		targetType := reflect.TypeOf(zero)
-		if targetType == nil || targetType.Kind() != reflect.Func {
-			ctx.LogError("目标类型必须是函数类型", map[string]any{"name": name})
-			// 发布函数调用失败事件
-			ctx.Router.PublishEventName(EventFunctionFailed, map[string]any{
-				"function": name,
-				"error":    "目标类型不是函数",
-				"trace_id": ctx.TraceID,
-				"duration": time.Since(startTime).Milliseconds(),
-				"reason":   "invalid_target_type",
-			})
-			return zero
-		}
-		originalFn := reflect.ValueOf(fn.Function)
-		if originalFn.Kind() != reflect.Func {
-			ctx.LogError("注册的函数无效", map[string]any{"name": name})
-			// 发布函数调用失败事件
-			ctx.Router.PublishEventName(EventFunctionFailed, map[string]any{
-				"function": name,
-				"error":    "注册的函数无效",
-				"trace_id": ctx.TraceID,
-				"duration": time.Since(startTime).Milliseconds(),
-				"reason":   "invalid_function",
-			})
-			return zero
-		}
-		wrappedFn := reflect.MakeFunc(targetType, func(args []reflect.Value) []reflect.Value {
-			// 发布函数调用成功事件
-			ctx.Router.PublishEventName(EventFunctionSuccess, map[string]any{
-				"function":  name,
-				"namespace": fn.Namespace,
-				"is_method": true,
-				"trace_id":  ctx.TraceID,
-				"duration":  time.Since(startTime).Milliseconds(),
-				"caller":    ctx.AgentID,
-			})
-			return originalFn.Call(append([]reflect.Value{reflect.ValueOf(v)}, args...))
-		})
-		return wrappedFn.Interface().(T)
-	default:
-		// 发布函数调用成功事件
-		ctx.Router.PublishEventName(EventFunctionSuccess, map[string]any{
-			"function":  name,
-			"is_method": false,
-			"trace_id":  ctx.TraceID,
-			"duration":  time.Since(startTime).Milliseconds(),
-			"caller":    ctx.AgentID,
-		})
-		return (fn.Function).(T)
-	}
+	ctx.CallFunc(name, &zero)
+	return zero
 }
 
-// CallFunc 链式调用
+// CallFunc 链式调用函数
+// ctx: 执行上下文
+// name: 函数名称
+// call: 回调函数，接收函数执行结果
 func CallFunc[T any](ctx *Context, name string, call func(fn T)) {
 	startTime := time.Now()
 	defer func() {
@@ -119,7 +61,6 @@ func CallFunc[T any](ctx *Context, name string, call func(fn T)) {
 			} else {
 				stackTrace = "无法获取堆栈信息"
 			}
-			// 发布函数调用 panic 事件
 			ctx.Router.PublishEventName(EventFunctionPanic, map[string]any{
 				"function":  name,
 				"panic":     panicValue,
@@ -130,7 +71,6 @@ func CallFunc[T any](ctx *Context, name string, call func(fn T)) {
 				"recovered": true,
 				"timestamp": time.Now().UnixNano(),
 			})
-			// 记录错误日志
 			ctx.LogError("函数调用发生panic", map[string]any{
 				"function": name,
 				"panic":    panicValue,
@@ -141,4 +81,26 @@ func CallFunc[T any](ctx *Context, name string, call func(fn T)) {
 		}
 	}()
 	call(Call[T](ctx, name))
+}
+
+// CallEnhanced 增强调用函数
+// ctx: 执行上下文
+// name: 函数名称
+// args: 函数参数
+// 返回: 执行结果和错误
+func CallEnhanced(ctx *Context, name string, args ...any) (any, error) {
+	return ctx.Call(name, args...)
+}
+
+// CallFuncEnhanced 增强的链式调用函数
+// ctx: 执行上下文
+// name: 函数名称
+// args: 函数参数
+// handler: 结果处理回调函数
+func CallFuncEnhanced(ctx *Context, name string, args []any, handler func(any, error)) {
+	// 直接使用新的 Call 函数
+	result, err := ctx.Call(name, args...)
+	if handler != nil {
+		handler(result, err)
+	}
 }

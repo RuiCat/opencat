@@ -3,30 +3,73 @@ package router
 import (
 	"fmt"
 	"reflect"
+	"sync"
 	"time"
 )
 
-// 路由器事件常量
-const (
-	// 函数管理事件
-	EventFunctionRegistered   = "router.function.registered"   // 函数注册成功
-	EventFunctionUnregistered = "router.function.unregistered" // 函数注销成功
-	EventFunctionEnabled      = "router.function.enabled"      // 函数启用
-	EventFunctionDisabled     = "router.function.disabled"     // 函数禁用
+// Router 路由器
+type Router struct {
+	mu              sync.RWMutex
+	functions       map[string]*Function
+	eventBus        *EventBus
+	config          *RouterConfig
+	callSemaphore   chan struct{}
+	stats           *RouterStats
+	triggerManager  *TriggerManager
+	eventPublisher  *RouterEventPublisher
+	recoveryHandler RecoveryHandler
+}
 
-	// 拦截器事件
-	EventInterceptorAdded   = "router.interceptor.added"   // 拦截器添加
-	EventInterceptorRemoved = "router.interceptor.removed" // 拦截器移除
-	EventInterceptorCleared = "router.interceptor.cleared" // 拦截器清空
-
-	// 触发器事件
-	EventTriggerRegistered   = "router.trigger.registered"   // 触发器注册
-	EventTriggerUnregistered = "router.trigger.unregistered" // 触发器注销
-	EventTriggerEnabled      = "router.trigger.enabled"      // 触发器启用
-	EventTriggerDisabled     = "router.trigger.disabled"     // 触发器禁用
-	EventTriggerFired        = "router.trigger.fired"        // 触发器触发
-	EventTriggerError        = "router.trigger.error"        // 触发器执行错误
-)
+// NewRouter 创建路由器
+func NewRouter(config *RouterConfig) *Router {
+	if config == nil {
+		config = DefaultConfig()
+	}
+	router := &Router{
+		functions: make(map[string]*Function),
+		eventBus: &EventBus{
+			subscribers: make(map[string][]EventHandler),
+		},
+		config:        config,
+		callSemaphore: make(chan struct{}, config.MaxConcurrentCalls),
+		stats: &RouterStats{
+			StartTime: time.Now(),
+		},
+		recoveryHandler: func(ctx *Context, block *DataBlock, panicValue any) *Result {
+			return &Result{
+				Success: false,
+				Error: &ErrorInfo{
+					Code:      "PANIC_RECOVERED",
+					Message:   fmt.Sprintf("函数执行panic: %v", panicValue),
+					Recovered: true,
+					Retryable: false,
+				},
+				TraceID: block.TraceID,
+			}
+		},
+	}
+	router.eventPublisher = NewRouterEventPublisher(router, config.EnableAsyncEvents)
+	if config.EnableTriggers {
+		if config.TriggerConfig == nil {
+			config.TriggerConfig = &TriggerManagerConfig{
+				MaxTriggers:        100,
+				EnableAsync:        true,
+				MaxConcurrentFires: 50,
+				EventBufferSize:    1000,
+				EnableStats:        true,
+			}
+		}
+		router.triggerManager = &TriggerManager{
+			triggers: make(map[string]*Trigger),
+			eventBus: router.eventBus,
+			stats: &TriggerManagerStats{
+				StartTime: time.Now(),
+			},
+			config: config.TriggerConfig,
+		}
+	}
+	return router
+}
 
 // Register 注册用户自定义函数
 func (r *Router) Register(name, description, namespace string, inputSchema, outputSchema []string, fun any) error {
@@ -57,15 +100,6 @@ func (r *Router) RegisterFunction(fn *Function) error {
 	if _, exists := r.functions[fn.Name]; exists {
 		return fmt.Errorf("函数已存在: %s", fn.Name)
 	}
-	if fn.CreatedAt.IsZero() {
-		fn.CreatedAt = time.Now()
-	}
-	if fn.Stats == nil {
-		fn.Stats = &FunctionStats{}
-	}
-	if !fn.Enabled {
-		fn.Enabled = true
-	}
 	if fn.Function == nil {
 		return fmt.Errorf("函数实现不能为空")
 	}
@@ -73,28 +107,27 @@ func (r *Router) RegisterFunction(fn *Function) error {
 	if val.Kind() != reflect.Func {
 		return fmt.Errorf("Function 字段必须是函数类型，当前类型: %v", val.Kind())
 	}
+	if fn.CreatedAt.IsZero() {
+		fn.CreatedAt = time.Now()
+	}
+	if fn.Stats == nil {
+		fn.Stats = &FunctionStats{}
+	}
 	tys := val.Type()
 	if numIn := tys.NumIn(); numIn != len(fn.InputSchema) {
 		firstArg := tys.In(0)
-		if fn.Namespace != "" && numIn == len(fn.InputSchema)+1 && (firstArg.Kind() == reflect.Struct || (firstArg.Kind() == reflect.Ptr && firstArg.Elem().Kind() == reflect.Struct)) {
+		if fn.Namespace != "" && numIn == len(fn.InputSchema)+1 &&
+			(firstArg.Kind() == reflect.Struct || (firstArg.Kind() == reflect.Ptr && firstArg.Elem().Kind() == reflect.Struct)) {
 			fn.IsMethod = true
 		} else {
-			return fmt.Errorf("函数参数数量不匹配: 函数有 %d 个参数，InputSchema 有 %d 个参数", numIn, len(fn.InputSchema))
+			return fmt.Errorf("函数参数数量不匹配: 函数有 %d 个参数，InputSchema 有 %d 个参数",
+				numIn, len(fn.InputSchema))
 		}
 	}
 	r.functions[fn.Name] = fn
 	r.stats.FunctionCount = len(r.functions)
-
-	// 发布函数注册事件
-	go r.PublishEventName(EventFunctionRegistered, map[string]any{
-		"name":        fn.Name,
-		"namespace":   fn.Namespace,
-		"description": fn.Description,
-		"builtin":     fn.Builtin,
-		"is_method":   fn.IsMethod,
-		"timestamp":   time.Now().UnixNano(),
-	})
-
+	builder := NewEventData().WithFunctionInfo(fn)
+	r.eventPublisher.PublishEventName(EventFunctionRegistered, builder.Build())
 	return nil
 }
 
@@ -114,20 +147,16 @@ func (r *Router) Unregister(name string) error {
 	}
 	delete(r.functions, name)
 	r.stats.FunctionCount = len(r.functions)
-
-	// 发布函数注销事件
-	go r.PublishEventName(EventFunctionUnregistered, map[string]any{
-		"name":        name,
-		"namespace":   fn.Namespace,
-		"description": fn.Description,
-		"builtin":     fn.Builtin,
-		"timestamp":   time.Now().UnixNano(),
-	})
-
+	builder := NewEventData().
+		With("name", name).
+		With("namespace", fn.Namespace).
+		With("description", fn.Description).
+		With("builtin", fn.Builtin)
+	r.eventPublisher.PublishEventName(EventFunctionUnregistered, builder.Build())
 	return nil
 }
 
-// GetFunction 获取函数信息
+// GetFunction 获取函数
 func (r *Router) GetFunction(name string) *Function {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -138,7 +167,11 @@ func (r *Router) GetFunction(name string) *Function {
 func (r *Router) ListFunctions() map[string]*Function {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.functions
+	functions := make(map[string]*Function, len(r.functions))
+	for k, v := range r.functions {
+		functions[k] = v
+	}
+	return functions
 }
 
 // EnableFunction 启用函数
@@ -150,14 +183,8 @@ func (r *Router) EnableFunction(name string) error {
 		return fmt.Errorf("函数不存在: %s", name)
 	}
 	fn.Enabled = true
-	// 发布函数启用事件
-	go r.PublishEventName(EventFunctionEnabled, map[string]any{
-		"name":        name,
-		"namespace":   fn.Namespace,
-		"description": fn.Description,
-		"builtin":     fn.Builtin,
-		"timestamp":   time.Now().UnixNano(),
-	})
+	builder := NewEventData().WithFunctionInfo(fn)
+	r.eventPublisher.PublishEventName(EventFunctionEnabled, builder.Build())
 	return nil
 }
 
@@ -170,97 +197,14 @@ func (r *Router) DisableFunction(name string) error {
 		return fmt.Errorf("函数不存在: %s", name)
 	}
 	fn.Enabled = false
-	// 发布函数禁用事件
-	go r.PublishEventName(EventFunctionDisabled, map[string]any{
-		"name":        name,
-		"namespace":   fn.Namespace,
-		"description": fn.Description,
-		"builtin":     fn.Builtin,
-		"timestamp":   time.Now().UnixNano(),
-	})
+	builder := NewEventData().WithFunctionInfo(fn)
+	r.eventPublisher.PublishEventName(EventFunctionDisabled, builder.Build())
 	return nil
 }
 
-// AddInterceptor 添加拦截器
-func (r *Router) AddInterceptor(name string, interceptor Interceptor) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if _, ok := r.interceptors[name]; ok {
-		return fmt.Errorf("拦截器已存在: %s", name)
-	}
-	r.interceptors[name] = interceptor
-	// 发布拦截器添加事件
-	go r.PublishEventName(EventInterceptorAdded, map[string]any{
-		"name":        name,
-		"interceptor": fmt.Sprintf("%T", interceptor),
-		"timestamp":   time.Now().UnixNano(),
-	})
-	return nil
-}
-
-// RemoveInterceptor 移除拦截器
-func (r *Router) RemoveInterceptor(name string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if _, ok := r.interceptors[name]; !ok {
-		return fmt.Errorf("拦截器不存在: %s", name)
-	}
-	delete(r.interceptors, name)
-	// 发布拦截器移除事件
-	go r.PublishEventName(EventInterceptorRemoved, map[string]any{
-		"name":      name,
-		"timestamp": time.Now().UnixNano(),
-	})
-	return nil
-}
-
-// ClearInterceptors 清空所有拦截器
-func (r *Router) ClearInterceptors() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	interceptorCount := len(r.interceptors)
-	r.interceptors = make(map[string]Interceptor, 0)
-	// 发布拦截器清空事件
-	go r.PublishEventName(EventInterceptorCleared, map[string]any{
-		"cleared_count": interceptorCount,
-		"timestamp":     time.Now().UnixNano(),
-	})
-}
-
-// InterceptorCount 获取拦截器数量
-func (r *Router) InterceptorCount() int {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return len(r.interceptors)
-}
-
-// PublishEvent 发布事件
-func (r *Router) PublishEvent(event string, blockType BlockType, data any) {
-	if r.eventBus != nil {
-		r.eventBus.Publish(event, blockType, data)
-	}
-}
-
-// PublishEventName 发布事件到事件总线和触发器管理器
+// PublishEventName 发布事件名称
 func (r *Router) PublishEventName(eventName string, data map[string]any) {
-	if r == nil {
-		return
-	}
-	event := &Event{
-		Name:   eventName,
-		Source: "router",
-		Data:   data,
-		Time:   time.Now(),
-	}
-	if traceID, ok := data["trace_id"].(string); ok {
-		event.TraceID = traceID
-	}
-	if r.eventBus != nil {
-		r.eventBus.Publish(eventName, BlockTypeEvent, event)
-	}
-	if r.config.EnableTriggers && r.triggerManager != nil {
-		go r.triggerManager.FireEvent(event)
-	}
+	r.eventPublisher.PublishEventName(eventName, data)
 }
 
 // SubscribeEvent 订阅事件
@@ -271,7 +215,7 @@ func (r *Router) SubscribeEvent(event string, handler EventHandler) int {
 	return -1
 }
 
-// FireTrigger 触发事件（通过触发器管理器）
+// FireTrigger 触发触发器
 func (r *Router) FireTrigger(event *Event) error {
 	if r.triggerManager == nil {
 		return fmt.Errorf("触发器管理器未启用")
@@ -287,7 +231,7 @@ func (r *Router) RegisterTrigger(trigger *Trigger) error {
 	return r.triggerManager.RegisterTrigger(trigger)
 }
 
-// GetStats 获取路由器统计信息
+// GetStats 获取统计信息
 func (r *Router) GetStats() *RouterStats {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -302,62 +246,19 @@ func (r *Router) GetStats() *RouterStats {
 	}
 }
 
-// GetConfig 获取路由器配置
+// GetConfig 获取配置
 func (r *Router) GetConfig() *RouterConfig {
 	return r.config
 }
 
-// SetRecoveryHandler 设置崩溃恢复处理器
+// SetRecoveryHandler 设置恢复处理器
 func (r *Router) SetRecoveryHandler(handler RecoveryHandler) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.recoveryHandler = handler
 }
 
-// NewDataBlock 创建新的数据块
-func NewDataBlock(target, source string, payload map[string]any) *DataBlock {
-	return &DataBlock{
-		ID:        fmt.Sprintf("block-%d", time.Now().UnixMicro()),
-		Type:      BlockTypeCommand,
-		Timestamp: time.Now().UnixMilli(),
-		Source:    source,
-		Target:    target,
-		Payload:   payload,
-		Metadata:  make(map[string]string),
-		TraceID:   fmt.Sprintf("block-%d", time.Now().UnixNano()),
-	}
-}
-
-// SuccessResult 创建成功结果
-func SuccessResult(data any, traceID string) *Result {
-	return &Result{
-		Success: true,
-		Data:    data,
-		TraceID: traceID,
-	}
-}
-
-// ErrorResult 创建错误结果
-func ErrorResult(code, message, traceID string) *Result {
-	return &Result{
-		Success: false,
-		Error: &ErrorInfo{
-			Code:    code,
-			Message: message,
-		},
-		TraceID: traceID,
-	}
-}
-
-// RetryableErrorResult 创建可重试的错误结果
-func RetryableErrorResult(code, message, traceID string) *Result {
-	return &Result{
-		Success: false,
-		Error: &ErrorInfo{
-			Code:      code,
-			Message:   message,
-			Retryable: true,
-		},
-		TraceID: traceID,
-	}
+// Shutdown 关闭路由器
+func (r *Router) Shutdown() {
+	r.eventPublisher.Shutdown()
 }

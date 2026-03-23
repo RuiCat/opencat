@@ -5,7 +5,8 @@ import (
 	"time"
 )
 
-// DefaultConfig 返回默认配置
+// DefaultConfig 返回默认的路由器配置
+// 返回: 默认配置实例
 func DefaultConfig() *RouterConfig {
 	return &RouterConfig{
 		MaxCallDepth:       10,
@@ -15,9 +16,10 @@ func DefaultConfig() *RouterConfig {
 		MaxFunctions:       1000,
 		MaxConcurrentCalls: 100,
 		EnableTriggers:     true,
+		EnableAsyncEvents:  true,
 		TriggerConfig: &TriggerManagerConfig{
 			MaxTriggers:        100,
-			EnableAsync:        true,
+			EnableAsync:        false,
 			MaxConcurrentFires: 50,
 			EventBufferSize:    1000,
 			EnableStats:        true,
@@ -25,14 +27,15 @@ func DefaultConfig() *RouterConfig {
 	}
 }
 
-// NewRouter 创建新的路由器实例
-func NewRouter(config *RouterConfig) *Router {
+// NewBasicRouter 创建基础路由器
+// config: 路由器配置，如果为nil则使用默认配置
+// 返回: 路由器实例
+func NewBasicRouter(config *RouterConfig) *Router {
 	if config == nil {
 		config = DefaultConfig()
 	}
 	router := &Router{
-		functions:    make(map[string]*Function),
-		interceptors: make(map[string]Interceptor, 0),
+		functions: make(map[string]*Function),
 		recoveryHandler: func(ctx *Context, block *DataBlock, panicValue any) *Result {
 			return &Result{
 				Success: false,
